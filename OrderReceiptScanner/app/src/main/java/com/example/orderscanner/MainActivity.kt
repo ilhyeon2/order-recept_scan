@@ -138,10 +138,10 @@ class MainActivity : AppCompatActivity() {
             return
         }
 
-        // 1. "수량"이라는 헤더 단어의 X 좌표 위치를 찾아 수량 열(Column)의 기준선 설정
+        // 1. "수량"이라는 헤더 단어의 X 좌표 위치를 찾아 수량 열(Column)의 기준선 설정 (Int 타입 유지)
         val quantityHeader = allElements.find { it.text.contains("수량") }
-        // 만약 "수량" 글자가 인식이 안 됐다면 화면 우측 60% 지점을 기본 수량 열 기준선으로 설정
-        val minQuantityX = quantityHeader?.boundingBox?.left ?: (allElements.maxOfOrNull { it.boundingBox?.right ?: 0 } ?: 0) * 0.55
+        val maxRight = allElements.maxOfOrNull { it.boundingBox?.right ?: 0 } ?: 0
+        val minQuantityX = quantityHeader?.boundingBox?.left ?: (maxRight * 55 / 100)
 
         // 2. Y축 높이 오차(45px)를 기준으로 전체 텍스트를 가로 행(Row) 단위로 그룹화
         val rows = mutableListOf<MutableList<Text.Element>>()
@@ -181,7 +181,7 @@ class MainActivity : AppCompatActivity() {
 
             if (processedMenus.contains(matchedMenu.name)) continue
 
-            // 4. [핵심] 수량 열 영역(minQuantityX 이상인 좌표)에 속한 텍스트만 모아서 수량 파악
+            // 4. 수량 열 영역(minQuantityX 이상인 좌표)에 속한 텍스트만 모아서 수량 파악
             val quantityElements = sortedRow.filter { (it.boundingBox?.left ?: 0) >= minQuantityX }
             val quantityText = quantityElements.joinToString("") { it.text }.trim()
 
