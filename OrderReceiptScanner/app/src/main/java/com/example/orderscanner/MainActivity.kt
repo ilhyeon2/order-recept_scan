@@ -22,6 +22,7 @@ import com.google.mlkit.vision.text.Text
 import com.google.mlkit.vision.text.TextRecognition
 import com.google.mlkit.vision.text.korean.KoreanTextRecognizerOptions
 import java.io.Serializable
+import kotlin.math.abs
 
 data class OrderItem(
     val menuName: String,
@@ -92,7 +93,7 @@ class MainActivity : AppCompatActivity() {
 
             recognizer.process(inputImage)
                 .addOnSuccessListener { visionText ->
-                    parseOrderSheetAndValidate(visionText, bitmap)
+                    parseOrderSheetAndValidate(visionText)
                 }
                 .addOnFailureListener {
                     showRetakeDialog("텍스트 인식이 불가능합니다. 빛 반사가 없는 곳에서 재촬영해 주세요.")
@@ -102,54 +103,72 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
-    private fun parseOrderSheetAndValidate(visionText: Text, originalBitmap: Bitmap) {
+    private fun parseOrderSheetAndValidate(visionText: Text) {
         val orderItemList = mutableListOf<OrderItem>()
         var calculatedGrandTotal = 0
-        var writtenTotalInSheet = -1
 
-        val textBlocks = visionText.textBlocks
+        // 1. OCR 인식된 모든 라인을 Y축(높이) 기준으로 같은 행(Row)끼리 그룹화
+        val allLines = visionText.textBlocks.flatMap { it.lines }
+        val rows = mutableListOf<MutableList<Text.Line>>()
+        val lineThreshold = 35 // 같은 행으로 판단할 Y축 오차 범위(px)
 
-        for (block in textBlocks) {
-            for (line in block.lines) {
-                val lineText = line.text.trim()
+        val sortedLines = allLines.sortedBy { it.boundingBox?.top ?: 0 }
 
-                if (lineText.contains("합계")) {
-                    val digits = lineText.replace("[^0-9]".toRegex(), "")
-                    if (digits.isNotEmpty()) {
-                        writtenTotalInSheet = digits.toInt()
-                    }
-                    continue
-                }
+        for (line in sortedLines) {
+            val box = line.boundingBox ?: continue
+            val lineCenterY = box.top + box.height() / 2
 
-                val numbers = "[0-9]+,[0-9]+|[0-9]+".toRegex().findAll(lineText)
-                    .map { it.value.replace(",", "").toInt() }
-                    .filter { it >= 1000 }
-                    .toList()
+            val matchedRow = rows.find { row ->
+                val rowCenterY = row.map { (it.boundingBox?.top ?: 0) + (it.boundingBox?.height() ?: 0) / 2 }.average()
+                abs(lineCenterY - rowCenterY) < lineThreshold
+            }
 
-                if (numbers.isNotEmpty()) {
-                    val unitPrice = numbers[0]
-                    val quantity = extractQuantityWithJeongRules(line, originalBitmap)
-
-                    if (unitPrice > 0 && quantity > 0) {
-                        val itemTotal = unitPrice * quantity
-                        calculatedGrandTotal += itemTotal
-
-                        val rawMenuName = lineText.replace("[0-9]|,|원|\\s".toRegex(), "")
-                        val menuName = if (rawMenuName.length >= 2) rawMenuName else "주문 메뉴"
-
-                        orderItemList.add(OrderItem(menuName, unitPrice, quantity, itemTotal))
-                    }
-                }
+            if (matchedRow != null) {
+                matchedRow.add(line)
+            } else {
+                rows.add(mutableListOf(line))
             }
         }
 
-        if (orderItemList.isEmpty()) {
-            showRetakeDialog("인식된 주문 내역이 없습니다. 주문서 전체가 보이도록 재촬영해 주세요.")
-            return
+        // 2. 각 행별로 [메뉴명 / 단가 / 수량(우측 손글씨)] 정밀 분석
+        for (row in rows) {
+            val sortedElements = row.sortedBy { it.boundingBox?.left ?: 0 }
+            val rowText = sortedElements.joinToString(" ") { it.text }
+
+            // 단가(숫자) 추출 (예: 35,000 -> 35000)
+            val priceMatch = "[0-9]{1,3}(,[0-9]{3})+|[0-9]{4,6}".toRegex().find(rowText) ?: continue
+            val unitPrice = priceMatch.value.replace(",", "").toIntOrNull() ?: continue
+
+            // 1,000원 미만이거나 '합계' 행은 제외
+            if (unitPrice < 1000 || rowText.contains("합계")) continue
+
+            // 단가 텍스트보다 오른쪽에 위치한 수량(손글씨) 영역 검색
+            val priceElement = sortedElements.find { it.text.contains(priceMatch.value) }
+            val priceRightX = priceElement?.boundingBox?.right ?: 0
+
+            val quantityElements = sortedElements.filter { (it.boundingBox?.left ?: 0) >= priceRightX - 10 }
+            val qtyText = quantityElements.joinToString("") { it.text }.trim()
+
+            // 우측 수량란이 비어있으면(손글씨가 없으면) 미주문 메뉴이므로 무시
+            val quantity = parseJeongQuantity(qtyText)
+            if (quantity <= 0) continue
+
+            // 메뉴명 추출 (단가 왼쪽 영역)
+            var menuName = rowText.substring(0, rowText.indexOf(priceMatch.value))
+                .replace("[0-9]|,|원|\\s|\\(1인\\)".toRegex(), "")
+                .trim()
+
+            if (menuName.length < 2) {
+                menuName = "주문 메뉴"
+            }
+
+            val itemTotal = unitPrice * quantity
+            calculatedGrandTotal += itemTotal
+            orderItemList.add(OrderItem(menuName, unitPrice, quantity, itemTotal))
         }
 
-        if (writtenTotalInSheet > 0 && writtenTotalInSheet != calculatedGrandTotal) {
-            showRetakeDialog("주문서에 기재된 합계(${writtenTotalInSheet}원)와 계산된 금액(${calculatedGrandTotal}원)이 일치하지 않습니다. 다시 촬영해 주세요.")
+        if (orderItemList.isEmpty()) {
+            showRetakeDialog("인식된 주문 내역이 없습니다. 수량이 표시된 부분을 바르게 재촬영해 주세요.")
             return
         }
 
@@ -160,33 +179,20 @@ class MainActivity : AppCompatActivity() {
         startActivity(intent)
     }
 
-    private fun extractQuantityWithJeongRules(line: Text.Line, originalBitmap: Bitmap): Int {
-        val lineText = line.text
+    private fun parseJeongQuantity(text: String): Int {
+        if (text.isEmpty()) return 0
 
-        val textBasedQty = JeongStrokeCounter.parseTextToQuantity(lineText)
-        if (textBasedQty > 1 || lineText.contains("T") || lineText.contains("正") || lineText.contains("ㅡ")) {
-            return textBasedQty
+        // 바를 정(正) 자 및 손글씨 기호(T, ㅡ) 변환
+        if (text.contains("正")) return 5
+        if (text.contains("T") || text.contains("t") || text.contains("r") || text.contains("TT")) return 2
+        if (text.contains("ㅡ") || text.contains("-") || text.contains("1") || text.contains("|")) return 1
+
+        val num = text.replace("[^0-9]".toRegex(), "").toIntOrNull()
+        if (num != null && num in 1..99) {
+            return num
         }
 
-        val boundingBox = line.boundingBox
-        if (boundingBox != null && boundingBox.width() > 0 && boundingBox.height() > 0) {
-            try {
-                val cropX = (boundingBox.left + boundingBox.width() * 0.7).toInt().coerceIn(0, originalBitmap.width - 1)
-                val cropY = boundingBox.top.coerceIn(0, originalBitmap.height - 1)
-                val cropW = (boundingBox.width() * 0.3).toInt().coerceAtMost(originalBitmap.width - cropX)
-                val cropH = boundingBox.height().coerceAtMost(originalBitmap.height - cropY)
-
-                if (cropW > 10 && cropH > 10) {
-                    val croppedBitmap = Bitmap.createBitmap(originalBitmap, cropX, cropY, cropW, cropH)
-                    val strokeCount = JeongStrokeCounter.countStrokesFromBitmap(croppedBitmap)
-                    if (strokeCount > 0) return strokeCount
-                }
-            } catch (e: Exception) {
-                // Ignore
-            }
-        }
-
-        return 1
+        return 0
     }
 
     private fun showRetakeDialog(message: String) {
