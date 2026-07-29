@@ -31,9 +31,34 @@ data class OrderItem(
     val totalPrice: Int
 ) : Serializable
 
+data class MasterMenu(
+    val name: String,
+    val keywords: List<String>,
+    val price: Int
+)
+
 class MainActivity : AppCompatActivity() {
 
     private lateinit var binding: ActivityMainBinding
+
+    // [장작떼기] 주문 계산서 고정 메뉴판 DB (메뉴명, OCR 인식 키워드, 단가)
+    private val masterMenuList = listOf(
+        MasterMenu("오리주물럭", listOf("오리주물럭", "주물럭"), 35000),
+        MasterMenu("오리로스", listOf("오리로스", "로스"), 35000),
+        MasterMenu("삼겹살(1인)", listOf("삼겹살", "삼겹"), 13000),
+        MasterMenu("추가반마리", listOf("추가반마리", "반마리"), 20000),
+        MasterMenu("된장찌개", listOf("된장찌개", "된장"), 2000),
+        MasterMenu("볶음밥", listOf("볶음밥", "볶음"), 2000),
+        MasterMenu("공기밥", listOf("공기밥", "공기"), 1000),
+        MasterMenu("쫄면", listOf("쫄면"), 2000),
+        MasterMenu("떡", listOf("떡"), 2000),
+        MasterMenu("소주", listOf("소주"), 4000),
+        MasterMenu("맥주", listOf("맥주"), 5000),
+        MasterMenu("막걸리", listOf("막걸리"), 4000),
+        MasterMenu("청하", listOf("청하"), 6000),
+        MasterMenu("백세주", listOf("백세주"), 10000),
+        MasterMenu("음료수", listOf("음료수", "음료"), 2000)
+    )
 
     private val scannerOptions = GmsDocumentScannerOptions.Builder()
         .setGalleryImportAllowed(false)
@@ -93,7 +118,7 @@ class MainActivity : AppCompatActivity() {
 
             recognizer.process(inputImage)
                 .addOnSuccessListener { visionText ->
-                    parseOrderSheetAndValidate(visionText)
+                    parseJangjakOrderSheet(visionText)
                 }
                 .addOnFailureListener {
                     showRetakeDialog("텍스트 인식이 불가능합니다. 빛 반사가 없는 곳에서 재촬영해 주세요.")
@@ -103,14 +128,19 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
-    private fun parseOrderSheetAndValidate(visionText: Text) {
+    private fun parseJangjakOrderSheet(visionText: Text) {
         val orderItemList = mutableListOf<OrderItem>()
         var calculatedGrandTotal = 0
 
-        // 1. OCR 인식된 모든 라인을 Y축(높이) 기준으로 같은 행(Row)끼리 그룹화
         val allLines = visionText.textBlocks.flatMap { it.lines }
+        if (allLines.isEmpty()) {
+            showRetakeDialog("인식된 텍스트가 없습니다. 다시 촬영해 주세요.")
+            return
+        }
+
+        // 1. Y축 좌표 기준으로 같은 행(Row)끼리 결합
         val rows = mutableListOf<MutableList<Text.Line>>()
-        val lineThreshold = 35 // 같은 행으로 판단할 Y축 오차 범위(px)
+        val lineThreshold = 45 // 같은 행 판단 Y축 허용 오차(px)
 
         val sortedLines = allLines.sortedBy { it.boundingBox?.top ?: 0 }
 
@@ -130,45 +160,44 @@ class MainActivity : AppCompatActivity() {
             }
         }
 
-        // 2. 각 행별로 [메뉴명 / 단가 / 수량(우측 손글씨)] 정밀 분석
+        val processedMenus = mutableSetOf<String>()
+
+        // 2. 각 행별로 '장작떼기' 사전 등록 메뉴와 매칭
         for (row in rows) {
             val sortedElements = row.sortedBy { it.boundingBox?.left ?: 0 }
-            val rowText = sortedElements.joinToString(" ") { it.text }
+            val fullRowText = sortedElements.joinToString(" ") { it.text }
+            val cleanRowText = fullRowText.replace("\\s".toRegex(), "")
 
-            // 단가(숫자) 추출 (예: 35,000 -> 35000)
-            val priceMatch = "[0-9]{1,3}(,[0-9]{3})+|[0-9]{4,6}".toRegex().find(rowText) ?: continue
-            val unitPrice = priceMatch.value.replace(",", "").toIntOrNull() ?: continue
+            // 등록된 메뉴판 DB와 대조
+            val matchedMenu = masterMenuList.find { menu ->
+                menu.keywords.any { keyword -> cleanRowText.contains(keyword) }
+            } ?: continue
 
-            // 1,000원 미만이거나 '합계' 행은 제외
-            if (unitPrice < 1000 || rowText.contains("합계")) continue
+            if (processedMenus.contains(matchedMenu.name)) continue
 
-            // 단가 텍스트보다 오른쪽에 위치한 수량(손글씨) 영역 검색
-            val priceElement = sortedElements.find { it.text.contains(priceMatch.value) }
-            val priceRightX = priceElement?.boundingBox?.right ?: 0
-
-            val quantityElements = sortedElements.filter { (it.boundingBox?.left ?: 0) >= priceRightX - 10 }
-            val qtyText = quantityElements.joinToString("") { it.text }.trim()
-
-            // 우측 수량란이 비어있으면(손글씨가 없으면) 미주문 메뉴이므로 무시
-            val quantity = parseJeongQuantity(qtyText)
-            if (quantity <= 0) continue
-
-            // 메뉴명 추출 (단가 왼쪽 영역)
-            var menuName = rowText.substring(0, rowText.indexOf(priceMatch.value))
-                .replace("[0-9]|,|원|\\s|\\(1인\\)".toRegex(), "")
-                .trim()
-
-            if (menuName.length < 2) {
-                menuName = "주문 메뉴"
+            // 메뉴명 및 단가를 제외한 수량 표기 영역 추출
+            var remainingText = cleanRowText
+            for (kw in matchedMenu.keywords) {
+                remainingText = remainingText.replace(kw, "")
             }
+            // 가격 숫자 제거 (35000, 35,000 등)
+            remainingText = remainingText.replace("[0-9]{1,3}(,[0-9]{3})+|[0-9]{3,6}".toRegex(), "")
+            remainingText = remainingText.replace("원", "").trim()
 
-            val itemTotal = unitPrice * quantity
-            calculatedGrandTotal += itemTotal
-            orderItemList.add(OrderItem(menuName, unitPrice, quantity, itemTotal))
+            // 손글씨 수량 해석
+            val quantity = parseHandwrittenQuantity(remainingText)
+
+            // 수량이 표시된 경우만 정산에 포함
+            if (quantity > 0) {
+                val totalPrice = matchedMenu.price * quantity
+                calculatedGrandTotal += totalPrice
+                orderItemList.add(OrderItem(matchedMenu.name, matchedMenu.price, quantity, totalPrice))
+                processedMenus.add(matchedMenu.name)
+            }
         }
 
         if (orderItemList.isEmpty()) {
-            showRetakeDialog("인식된 주문 내역이 없습니다. 수량이 표시된 부분을 바르게 재촬영해 주세요.")
+            showRetakeDialog("주문 수량이 표시된 메뉴를 찾지 못했습니다. 수량이 적힌 부분이 잘 보이도록 재촬영해 주세요.")
             return
         }
 
@@ -179,17 +208,37 @@ class MainActivity : AppCompatActivity() {
         startActivity(intent)
     }
 
-    private fun parseJeongQuantity(text: String): Int {
+    private fun parseHandwrittenQuantity(rawText: String): Int {
+        val text = rawText.trim()
         if (text.isEmpty()) return 0
 
-        // 바를 정(正) 자 및 손글씨 기호(T, ㅡ) 변환
+        // 1. 바를 정(正) 자 -> 5개
         if (text.contains("正")) return 5
-        if (text.contains("T") || text.contains("t") || text.contains("r") || text.contains("TT")) return 2
-        if (text.contains("ㅡ") || text.contains("-") || text.contains("1") || text.contains("|")) return 1
 
-        val num = text.replace("[^0-9]".toRegex(), "").toIntOrNull()
-        if (num != null && num in 1..99) {
-            return num
+        // 2. 수량 2개 표기 (T, t, r, Y, y, V, v, 7, TT, ㅠ, ┬ 등 손글씨 OCR 인식 패턴)
+        if (text.contains("T", ignoreCase = true) ||
+            text.contains("r", ignoreCase = true) ||
+            text.contains("Y", ignoreCase = true) ||
+            text.contains("V", ignoreCase = true) ||
+            text.contains("7") ||
+            text.contains("ㅠ") ||
+            text.contains("┬")) {
+            return 2
+        }
+
+        // 3. 수량 1개 표기 (ㅡ, -, 1, |, I, l, J, ~, ─, _ 등)
+        if (text.contains("ㅡ") || text.contains("-") || text.contains("~") ||
+            text.contains("1") || text.contains("|") || text.contains("─") ||
+            text.contains("I") || text.contains("l") || text.contains("_") ||
+            text.contains("J", ignoreCase = true)) {
+            return 1
+        }
+
+        // 4. 일반 아라비아 숫자
+        val digits = text.replace("[^0-9]".toRegex(), "")
+        if (digits.isNotEmpty()) {
+            val num = digits.toIntOrNull() ?: 0
+            if (num in 1..99) return num
         }
 
         return 0
