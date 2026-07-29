@@ -20,12 +20,10 @@ class ReceiptActivity : AppCompatActivity() {
 
         displayReceipt(orderItems, totalPrice)
 
-        // 재촬영 버튼
         binding.btnRetake.setOnClickListener {
-            finish() // 이전 화면으로 돌아가서 재촬영
+            finish()
         }
 
-        // 확인 완료 버튼
         binding.btnConfirm.setOnClickListener {
             finish()
         }
@@ -35,22 +33,17 @@ class ReceiptActivity : AppCompatActivity() {
         val formatter = NumberFormat.getNumberInstance(Locale.KOREA)
         val sb = StringBuilder()
 
-        sb.append("=========================================
-")
-        sb.append(String.format("%-14s %4s %12s
-", "메뉴명", "수량", "금액"))
-        sb.append("-----------------------------------------
-")
+        sb.append("=========================================\n")
+        sb.append(String.format("%-14s %4s %12s\n", "메뉴명", "수량", "금액"))
+        sb.append("-----------------------------------------\n")
 
         for (item in items) {
             val name = if (item.menuName.length > 8) item.menuName.substring(0, 8) else item.menuName
             val formattedItemTotal = formatter.format(item.totalPrice) + "원"
-            sb.append(String.format("%-12s %3d개 %12s
-", name, item.quantity, formattedItemTotal))
+            sb.append(String.format("%-12s %3d개 %12s\n", name, item.quantity, formattedItemTotal))
         }
 
-        sb.append("=========================================
-")
+        sb.append("=========================================\n")
 
         binding.tvReceiptContent.text = sb.toString()
         binding.tvTotalPrice.text = "총 합계: ${formatter.format(total)}원"
