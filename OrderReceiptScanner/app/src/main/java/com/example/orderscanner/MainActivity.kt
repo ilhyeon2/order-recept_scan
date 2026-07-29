@@ -118,7 +118,7 @@ class MainActivity : AppCompatActivity() {
 
             recognizer.process(inputImage)
                 .addOnSuccessListener { visionText ->
-                    parseJangjakOrderSheet(visionText)
+                    parseJangjakOrderSheetByColumn(visionText)
                 }
                 .addOnFailureListener {
                     showRetakeDialog("텍스트 인식이 불가능합니다. 빛 반사가 없는 곳에서 재촬영해 주세요.")
@@ -128,7 +128,7 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
-    private fun parseJangjakOrderSheet(visionText: Text) {
+    private fun parseJangjakOrderSheetByColumn(visionText: Text) {
         val orderItemList = mutableListOf<OrderItem>()
         var calculatedGrandTotal = 0
 
@@ -138,7 +138,12 @@ class MainActivity : AppCompatActivity() {
             return
         }
 
-        // Y축 높이 기준으로 같은 행(Row)으로 그룹화
+        // 1. "수량"이라는 헤더 단어의 X 좌표 위치를 찾아 수량 열(Column)의 기준선 설정
+        val quantityHeader = allElements.find { it.text.contains("수량") }
+        // 만약 "수량" 글자가 인식이 안 됐다면 화면 우측 60% 지점을 기본 수량 열 기준선으로 설정
+        val minQuantityX = quantityHeader?.boundingBox?.left ?: (allElements.maxOfOrNull { it.boundingBox?.right ?: 0 } ?: 0) * 0.55
+
+        // 2. Y축 높이 오차(45px)를 기준으로 전체 텍스트를 가로 행(Row) 단위로 그룹화
         val rows = mutableListOf<MutableList<Text.Element>>()
         val lineThreshold = 45
         val sortedElements = allElements.sortedBy { it.boundingBox?.top ?: 0 }
@@ -161,47 +166,29 @@ class MainActivity : AppCompatActivity() {
 
         val processedMenus = mutableSetOf<String>()
 
+        // 3. 각 행(Row)별로 검사 수행
         for (row in rows) {
             val sortedRow = row.sortedBy { it.boundingBox?.left ?: 0 }
-            val fullRowText = sortedRow.joinToString("") { it.text }.replace("\\s".toRegex(), "")
+            val fullRowText = sortedRow.joinToString("") { it.text }
 
-            // 등록된 메뉴판 DB와 매칭
+            // 헤더 행("메뉴", "금액", "수량" 등이 포함된 줄)은 건너뜀
+            if (fullRowText.contains("메뉴") && fullRowText.contains("금액")) continue
+
+            // 현재 행에 등록된 메뉴 키워드가 포함되어 있는지 확인
             val matchedMenu = masterMenuList.find { menu ->
-                menu.keywords.any { keyword -> fullRowText.contains(keyword) }
+                menu.keywords.any { keyword -> fullRowText.replace("\\s".toRegex(), "").contains(keyword) }
             } ?: continue
 
             if (processedMenus.contains(matchedMenu.name)) continue
 
-            // 단가 문자열(예: "35,000" 또는 "4,000")의 X 좌표를 기준으로 우측 영역 분리
-            val priceStr = String.format("%,d", matchedMenu.price)
-            val priceAltStr = matchedMenu.price.toString()
-            
-            var rightSideText = ""
-            var foundPrice = false
+            // 4. [핵심] 수량 열 영역(minQuantityX 이상인 좌표)에 속한 텍스트만 모아서 수량 파악
+            val quantityElements = sortedRow.filter { (it.boundingBox?.left ?: 0) >= minQuantityX }
+            val quantityText = quantityElements.joinToString("") { it.text }.trim()
 
-            for (element in sortedRow) {
-                val text = element.text
-                if (!foundPrice && (text.contains(priceStr) || text.contains(priceAltStr) || text.contains("000"))) {
-                    foundPrice = true
-                    // 단가와 함께 붙어 읽힌 글자가 있다면 제거
-                    val cleaned = text.replace(priceStr, "").replace(priceAltStr, "").replace("000", "").replace(",", "").replace("원", "")
-                    rightSideText += cleaned
-                } else if (foundPrice) {
-                    rightSideText += text
-                }
-            }
+            // 수량 열에 적힌 손글씨 해석
+            val quantity = parseHandwrittenQuantity(quantityText)
 
-            // 단가를 명확히 찾지 못한 경우의 백업 처리
-            if (!foundPrice) {
-                var remaining = fullRowText
-                for (kw in matchedMenu.keywords) remaining = remaining.replace(kw, "")
-                remaining = remaining.replace(priceStr, "").replace(priceAltStr, "").replace(",", "").replace("원", "")
-                rightSideText = remaining
-            }
-
-            // [핵심] 수량 기호 정밀 판독
-            val quantity = parseHandwrittenQuantity(rightSideText)
-
+            // 수량이 1개 이상 명시된 경우에만 정산 리스트에 추가
             if (quantity > 0) {
                 val totalPrice = matchedMenu.price * quantity
                 calculatedGrandTotal += totalPrice
@@ -229,7 +216,7 @@ class MainActivity : AppCompatActivity() {
         // 1. 바를 정(正) 자
         if (text.contains("正")) return 5
 
-        // 2. 수량 2개 표기 (T, t, r, Y, y, V, v, 7, ㅠ, ┬, ㄱ 등 손글씨 변형 패턴 강화)
+        // 2. 수량 2개 표기 (T, t, r, Y, y, V, v, 7, ㅠ, ┬, ㄱ 등)
         if (text.contains("T", ignoreCase = true) ||
             text.contains("r", ignoreCase = true) ||
             text.contains("Y", ignoreCase = true) ||
@@ -249,7 +236,7 @@ class MainActivity : AppCompatActivity() {
             return 1
         }
 
-        // 4. 일반 아라비아 숫자 (1~9 사이만 허용하여 단가 파편 오인 방지)
+        // 4. 일반 아라비아 숫자 (1~9 사이)
         val digits = text.replace("[^0-9]".toRegex(), "")
         if (digits.isNotEmpty()) {
             val num = digits.toIntOrNull() ?: 0
