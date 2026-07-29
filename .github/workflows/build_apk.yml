@@ -26,11 +26,16 @@ jobs:
         distribution: 'temurin'
         cache: gradle
 
-    - name: Setup Gradle
-      uses: gradle/actions/setup-gradle@v3
+    # 프로젝트에 최적화된 Gradle 버전으로 래퍼 생성
+    - name: Generate Gradle Wrapper
+      run: gradle wrapper --gradle-version 8.4
 
+    - name: Grant execute permission for gradlew
+      run: chmod +x gradlew
+
+    # Gradle Wrapper 스크립트로 빌드 수행
     - name: Build Debug APK
-      run: gradle assembleDebug
+      run: ./gradlew assembleDebug --no-daemon
 
     - name: Upload APK Artifact
       uses: actions/upload-artifact@v4
