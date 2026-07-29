@@ -41,7 +41,7 @@ class MainActivity : AppCompatActivity() {
 
     private lateinit var binding: ActivityMainBinding
 
-    // [장작떼기] 주문 계산서 고정 메뉴판 DB (메뉴명, OCR 인식 키워드, 단가)
+    // [장작떼기] 고정 메뉴판 DB
     private val masterMenuList = listOf(
         MasterMenu("오리주물럭", listOf("오리주물럭", "주물럭"), 35000),
         MasterMenu("오리로스", listOf("오리로스", "로스"), 35000),
@@ -132,62 +132,76 @@ class MainActivity : AppCompatActivity() {
         val orderItemList = mutableListOf<OrderItem>()
         var calculatedGrandTotal = 0
 
-        val allLines = visionText.textBlocks.flatMap { it.lines }
-        if (allLines.isEmpty()) {
+        val allElements = visionText.textBlocks.flatMap { it.lines }.flatMap { it.elements }
+        if (allElements.isEmpty()) {
             showRetakeDialog("인식된 텍스트가 없습니다. 다시 촬영해 주세요.")
             return
         }
 
-        // 1. Y축 좌표 기준으로 같은 행(Row)끼리 결합
-        val rows = mutableListOf<MutableList<Text.Line>>()
-        val lineThreshold = 45 // 같은 행 판단 Y축 허용 오차(px)
+        // Y축 높이 기준으로 같은 행(Row)으로 그룹화
+        val rows = mutableListOf<MutableList<Text.Element>>()
+        val lineThreshold = 45
+        val sortedElements = allElements.sortedBy { it.boundingBox?.top ?: 0 }
 
-        val sortedLines = allLines.sortedBy { it.boundingBox?.top ?: 0 }
-
-        for (line in sortedLines) {
-            val box = line.boundingBox ?: continue
-            val lineCenterY = box.top + box.height() / 2
+        for (element in sortedElements) {
+            val box = element.boundingBox ?: continue
+            val centerY = box.top + box.height() / 2
 
             val matchedRow = rows.find { row ->
                 val rowCenterY = row.map { (it.boundingBox?.top ?: 0) + (it.boundingBox?.height() ?: 0) / 2 }.average()
-                abs(lineCenterY - rowCenterY) < lineThreshold
+                abs(centerY - rowCenterY) < lineThreshold
             }
 
             if (matchedRow != null) {
-                matchedRow.add(line)
+                matchedRow.add(element)
             } else {
-                rows.add(mutableListOf(line))
+                rows.add(mutableListOf(element))
             }
         }
 
         val processedMenus = mutableSetOf<String>()
 
-        // 2. 각 행별로 '장작떼기' 사전 등록 메뉴와 매칭
         for (row in rows) {
-            val sortedElements = row.sortedBy { it.boundingBox?.left ?: 0 }
-            val fullRowText = sortedElements.joinToString(" ") { it.text }
-            val cleanRowText = fullRowText.replace("\\s".toRegex(), "")
+            val sortedRow = row.sortedBy { it.boundingBox?.left ?: 0 }
+            val fullRowText = sortedRow.joinToString("") { it.text }.replace("\\s".toRegex(), "")
 
-            // 등록된 메뉴판 DB와 대조
+            // 등록된 메뉴판 DB와 매칭
             val matchedMenu = masterMenuList.find { menu ->
-                menu.keywords.any { keyword -> cleanRowText.contains(keyword) }
+                menu.keywords.any { keyword -> fullRowText.contains(keyword) }
             } ?: continue
 
             if (processedMenus.contains(matchedMenu.name)) continue
 
-            // 메뉴명 및 단가를 제외한 수량 표기 영역 추출
-            var remainingText = cleanRowText
-            for (kw in matchedMenu.keywords) {
-                remainingText = remainingText.replace(kw, "")
+            // 단가 문자열(예: "35,000" 또는 "4,000")의 X 좌표를 기준으로 우측 영역 분리
+            val priceStr = String.format("%,d", matchedMenu.price)
+            val priceAltStr = matchedMenu.price.toString()
+            
+            var rightSideText = ""
+            var foundPrice = false
+
+            for (element in sortedRow) {
+                val text = element.text
+                if (!foundPrice && (text.contains(priceStr) || text.contains(priceAltStr) || text.contains("000"))) {
+                    foundPrice = true
+                    // 단가와 함께 붙어 읽힌 글자가 있다면 제거
+                    val cleaned = text.replace(priceStr, "").replace(priceAltStr, "").replace("000", "").replace(",", "").replace("원", "")
+                    rightSideText += cleaned
+                } else if (foundPrice) {
+                    rightSideText += text
+                }
             }
-            // 가격 숫자 제거 (35000, 35,000 등)
-            remainingText = remainingText.replace("[0-9]{1,3}(,[0-9]{3})+|[0-9]{3,6}".toRegex(), "")
-            remainingText = remainingText.replace("원", "").trim()
 
-            // 손글씨 수량 해석
-            val quantity = parseHandwrittenQuantity(remainingText)
+            // 단가를 명확히 찾지 못한 경우의 백업 처리
+            if (!foundPrice) {
+                var remaining = fullRowText
+                for (kw in matchedMenu.keywords) remaining = remaining.replace(kw, "")
+                remaining = remaining.replace(priceStr, "").replace(priceAltStr, "").replace(",", "").replace("원", "")
+                rightSideText = remaining
+            }
 
-            // 수량이 표시된 경우만 정산에 포함
+            // [핵심] 수량 기호 정밀 판독
+            val quantity = parseHandwrittenQuantity(rightSideText)
+
             if (quantity > 0) {
                 val totalPrice = matchedMenu.price * quantity
                 calculatedGrandTotal += totalPrice
@@ -212,21 +226,22 @@ class MainActivity : AppCompatActivity() {
         val text = rawText.trim()
         if (text.isEmpty()) return 0
 
-        // 1. 바를 정(正) 자 -> 5개
+        // 1. 바를 정(正) 자
         if (text.contains("正")) return 5
 
-        // 2. 수량 2개 표기 (T, t, r, Y, y, V, v, 7, TT, ㅠ, ┬ 등 손글씨 OCR 인식 패턴)
+        // 2. 수량 2개 표기 (T, t, r, Y, y, V, v, 7, ㅠ, ┬, ㄱ 등 손글씨 변형 패턴 강화)
         if (text.contains("T", ignoreCase = true) ||
             text.contains("r", ignoreCase = true) ||
             text.contains("Y", ignoreCase = true) ||
             text.contains("V", ignoreCase = true) ||
             text.contains("7") ||
             text.contains("ㅠ") ||
-            text.contains("┬")) {
+            text.contains("┬") ||
+            text.contains("ㄱ")) {
             return 2
         }
 
-        // 3. 수량 1개 표기 (ㅡ, -, 1, |, I, l, J, ~, ─, _ 등)
+        // 3. 수량 1개 표기 (ㅡ, -, ~, 1, |, I, l, _, ─ 등)
         if (text.contains("ㅡ") || text.contains("-") || text.contains("~") ||
             text.contains("1") || text.contains("|") || text.contains("─") ||
             text.contains("I") || text.contains("l") || text.contains("_") ||
@@ -234,11 +249,11 @@ class MainActivity : AppCompatActivity() {
             return 1
         }
 
-        // 4. 일반 아라비아 숫자
+        // 4. 일반 아라비아 숫자 (1~9 사이만 허용하여 단가 파편 오인 방지)
         val digits = text.replace("[^0-9]".toRegex(), "")
         if (digits.isNotEmpty()) {
             val num = digits.toIntOrNull() ?: 0
-            if (num in 1..99) return num
+            if (num in 1..9) return num
         }
 
         return 0
