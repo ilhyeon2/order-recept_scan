@@ -1,0 +1,37 @@
+<?xml version="1.0" encoding="utf-8"?>
+<LinearLayout
+    xmlns:android="http://schemas.android.com/apk/res/android"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent"
+    android:orientation="vertical"
+    android:padding="16dp">
+
+    <TextView
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:text="🔍 인식 영역(그리드) 검증 화면\n• 파란 박스: 텍스트 영역 | • 빨간 선: 열 구분선"
+        android:textSize="14sp"
+        android:textStyle="bold"
+        android:gravity="center"
+        android:paddingBottom="8dp"/>
+
+    <!-- 그리드 선이 그려진 이미지를 보여주는 영역 -->
+    <ImageView
+        android:id="@+id/ivGridPreview"
+        android:layout_width="match_parent"
+        android:layout_height="0dp"
+        android:layout_weight="1"
+        android:adjustViewBounds="true"
+        android:scaleType="fitCenter" />
+
+    <!-- 최종 정산으로 넘어가는 다음 버튼 -->
+    <Button
+        android:id="@+id/btnProceedToReceipt"
+        android:layout_width="match_parent"
+        android:layout_height="60dp"
+        android:layout_marginTop="12dp"
+        android:text="다음 (정산서로 이동)"
+        android:textSize="16sp"
+        android:textStyle="bold" />
+
+</LinearLayout>
