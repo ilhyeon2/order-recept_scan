@@ -2,7 +2,10 @@ package com.example.orderscanner
 
 import android.content.Intent
 import android.graphics.Bitmap
+import android.graphics.Canvas
+import android.graphics.Color
 import android.graphics.ImageDecoder
+import android.graphics.Paint
 import android.net.Uri
 import android.os.Build
 import android.os.Bundle
@@ -41,7 +44,6 @@ class MainActivity : AppCompatActivity() {
 
     private lateinit var binding: ActivityMainBinding
 
-    // [장작떼기] 고정 메뉴판 DB
     private val masterMenuList = listOf(
         MasterMenu("오리주물럭", listOf("오리주물럭", "주물럭"), 35000),
         MasterMenu("오리로스", listOf("오리로스", "로스"), 35000),
@@ -60,17 +62,15 @@ class MainActivity : AppCompatActivity() {
         MasterMenu("음료수", listOf("음료수", "음료"), 2000)
     )
 
-    // 문서 스캐너 옵션 (자동 외곽선 감지 및 이미지 평면 보정 적용)
     private val scannerOptions = GmsDocumentScannerOptions.Builder()
         .setGalleryImportAllowed(false)
         .setPageLimit(1)
         .setResultFormats(RESULT_FORMAT_JPEG)
-        .setScannerMode(SCANNER_MODE_FULL) 
+        .setScannerMode(SCANNER_MODE_FULL)
         .build()
 
     private val scanner by lazy { GmsDocumentScanning.getClient(scannerOptions) }
 
-    // 스캐너 실행 결과 처리기 (중복 선언 제거 완료)
     private val scannerLauncher = registerForActivityResult(
         ActivityResultContracts.StartIntentSenderForResult()
     ) { result ->
@@ -120,7 +120,7 @@ class MainActivity : AppCompatActivity() {
 
             recognizer.process(inputImage)
                 .addOnSuccessListener { visionText ->
-                    parseOrderSheetWithDynamicGrid(visionText)
+                    parseOrderSheetWithDynamicGrid(bitmap, visionText)
                 }
                 .addOnFailureListener {
                     showRetakeDialog("텍스트 인식이 불가능합니다. 빛 반사가 없는 곳에서 재촬영해 주세요.")
@@ -130,8 +130,7 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
-    // [핵심 로직 1] 동적 가상 그리드 분할 및 정산 프로세서
-    private fun parseOrderSheetWithDynamicGrid(visionText: Text) {
+    private fun parseOrderSheetWithDynamicGrid(bitmap: Bitmap, visionText: Text) {
         val orderItemList = mutableListOf<OrderItem>()
         var calculatedGrandTotal = 0
 
@@ -141,15 +140,21 @@ class MainActivity : AppCompatActivity() {
             return
         }
 
-        // 1. [동적 세로 열(Column) 경계선 설정] - '금액'과 '수량' 헤더 위치 파악
         val priceHeader = allElements.find { it.text.contains("금액") }
         val qtyHeader = allElements.find { it.text.contains("수량") }
 
         val maxRight = allElements.maxOfOrNull { it.boundingBox?.right ?: 0 } ?: 1000
-        val col1Boundary = priceHeader?.boundingBox?.left ?: (maxRight * 0.4).toInt() // 메뉴와 금액 사이 구분선
-        val col2Boundary = qtyHeader?.boundingBox?.left ?: (maxRight * 0.7).toInt()  // 금액과 수량 사이 구분선
+        val col1Boundary = priceHeader?.boundingBox?.left ?: (maxRight * 0.4).toInt()
 
-        // 2. [동적 가로 행(Row) 그룹화] - 해상도에 구애받지 않고 글자 높이로 같은 줄 판별
+        val col2Boundary = if (qtyHeader?.boundingBox != null) {
+            (qtyHeader.boundingBox!!.left - 50).coerceAtLeast(col1Boundary + 50)
+        } else {
+            (maxRight * 0.62).toInt()
+        }
+
+        // [디버그 시각화 테스트용] 필요시 주석을 해제하여 디버그용 오버레이 이미지를 확인할 수 있습니다.
+        // val debugBitmap = drawDebugOverlay(bitmap, visionText, col1Boundary, col2Boundary)
+
         val rows = mutableListOf<MutableList<Text.Element>>()
         val sortedElements = allElements.sortedBy { it.boundingBox?.top ?: 0 }
 
@@ -172,9 +177,7 @@ class MainActivity : AppCompatActivity() {
 
         val processedMenus = mutableSetOf<String>()
 
-        // 3. [그리드 셀 분석 및 수량 판독]
         for (row in rows) {
-            // 열 경계선을 기준으로 셀 데이터 분리
             val menuCellElements = row.filter { (it.boundingBox?.centerX() ?: 0) < col1Boundary }
             val qtyCellElements = row.filter { (it.boundingBox?.centerX() ?: 0) > col2Boundary }
 
@@ -185,10 +188,8 @@ class MainActivity : AppCompatActivity() {
                 menu.keywords.any { keyword -> rowMenuText.contains(keyword) }
             } ?: continue
 
-            // 중복 계산 방지
             if (processedMenus.contains(matchedMenu.name)) continue
 
-            // 수량 셀 영역의 텍스트를 파싱 알고리즘으로 넘김
             val qtyRawText = qtyCellElements.joinToString("") { it.text }
             val quantity = parseTallyStrokes(qtyRawText)
 
@@ -205,7 +206,6 @@ class MainActivity : AppCompatActivity() {
             return
         }
 
-        // 결과 화면으로 데이터 전달 및 이동
         val intent = Intent(this, ReceiptActivity::class.java).apply {
             putExtra("ORDER_ITEMS", ArrayList(orderItemList))
             putExtra("TOTAL_PRICE", calculatedGrandTotal)
@@ -213,29 +213,54 @@ class MainActivity : AppCompatActivity() {
         startActivity(intent)
     }
 
-    // [핵심 로직 2] '바를 정(正)' 획수 인식 및 조합 치환 (대량 주문対応)
+    // [추가된 디버그 시각화 함수] 텍스트 영역(파란색)과 열 경계선(빨간색)을 그려 반환
+    private fun drawDebugOverlay(bitmap: Bitmap, visionText: Text, col1: Int, col2: Int): Bitmap {
+        val mutableBitmap = bitmap.copy(Bitmap.Config.ARGB_8888, true)
+        val canvas = Canvas(mutableBitmap)
+        
+        val paintBox = Paint().apply {
+            color = Color.BLUE
+            style = Paint.Style.STROKE
+            strokeWidth = 3f
+        }
+        
+        val paintCol = Paint().apply {
+            color = Color.RED
+            style = Paint.Style.STROKE
+            strokeWidth = 6f
+        }
+
+        val allElements = visionText.textBlocks.flatMap { it.lines }.flatMap { it.elements }
+        for (element in allElements) {
+            element.boundingBox?.let { box ->
+                canvas.drawRect(box, paintBox)
+            }
+        }
+
+        canvas.drawLine(col1.toFloat(), 0f, col1.toFloat(), mutableBitmap.height.toFloat(), paintCol)
+        canvas.drawLine(col2.toFloat(), 0f, col2.toFloat(), mutableBitmap.height.toFloat(), paintCol)
+
+        return mutableBitmap
+    }
+
     private fun parseTallyStrokes(rawText: String): Int {
         var text = rawText.replace("\\s".toRegex(), "")
         if (text.isEmpty()) return 0
 
-        // 1. 숫자로만 직접 기입된 경우 빠른 리턴
         val pureDigits = text.replace("[^0-9]".toRegex(), "")
         if (pureDigits.isNotEmpty() && text.length == pureDigits.length) {
             val num = pureDigits.toIntOrNull() ?: 0
             if (num in 1..99) return num
         }
 
-        // 2. 완성된 '正' 자 개수 세기 및 분리
         val fullZhengCount = text.count { it == '正' }
         text = text.replace("正", "")
 
-        // 3. '正' 자를 제외한 나머지 획수 분석
         val remainderStrokes = parseSingleTallyPattern(text)
 
         val total = (fullZhengCount * 5) + remainderStrokes
         if (total > 0) return total
 
-        // 4. 예외 방어: 특수문자와 숫자가 섞여서 들어온 경우 숫자만 추출
         if (pureDigits.isNotEmpty()) {
             val num = pureDigits.toIntOrNull() ?: 0
             if (num in 1..99) return num
@@ -244,30 +269,25 @@ class MainActivity : AppCompatActivity() {
         return 0
     }
 
-    // [핵심 로직 3] 이미지(image_2ad4fc.png) 맞춤형 단일 획수 패턴 매칭
     private fun parseSingleTallyPattern(text: String): Int {
         if (text.isEmpty()) return 0
         val upperText = text.uppercase()
 
-        // [4획]: 이미지 기준 -> iF, |F, IF, 王 (임금 왕), E
         if (upperText.contains("IF") || upperText.contains("|F") || 
             upperText.contains("王") || upperText.contains("E")) {
             return 4
         }
 
-        // [3획]: 이미지 기준 -> 下 (아래 하), ㅠ
         if (upperText.contains("下") || upperText.contains("ㅠ")) {
             return 3
         }
 
-        // [2획]: 이미지 기준 -> T, 丅(아래 하 이체자), ㅜ, ┬, ㄱ
         if (upperText.contains("T") || upperText.contains("丅") ||
             upperText.contains("┬") || upperText.contains("ㅜ") ||
             upperText.contains("ㄱ")) {
             return 2
         }
 
-        // [1획]: 이미지 기준 -> 一 (한자 일), -, ㅡ, 1, _, ~
         if (upperText.contains("一") || upperText.contains("-") ||
             upperText.contains("ㅡ") || upperText.contains("1") ||
             upperText.contains("_") || upperText.contains("~")) {
