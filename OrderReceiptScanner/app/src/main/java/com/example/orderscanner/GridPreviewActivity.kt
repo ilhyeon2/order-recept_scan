@@ -119,7 +119,7 @@ class GridPreviewActivity : AppCompatActivity() {
         val priceHeader = allElements.find { it.text.contains("금액") }
         val qtyHeader = allElements.find { it.text.contains("수량") }
 
-        val maxRight = allElements.maxOfOrNull { it.boundingBox?.right ?: 0 } ?: 1000
+        val maxRight = allElements.maxOfOrNull { it.boundingBox?.right ?: 0 } ?: bitmap.width
         val col1Boundary = priceHeader?.boundingBox?.left ?: (maxRight * 0.4).toInt()
 
         val col2Boundary = if (qtyHeader?.boundingBox != null) {
@@ -128,11 +128,15 @@ class GridPreviewActivity : AppCompatActivity() {
             (maxRight * 0.62).toInt()
         }
 
-        // 1. 그리드 선(빨간선) 및 텍스트 박스(파란 박스)가 그려진 디버그 이미지 생성 후 화면에 표시
+        // [개선] 고해상도 이미지 크기에 비례하여 선 두께를 동적으로 계산 (선이 안 보이던 문제 해결)
+        val scaleFactor = (bitmap.width.toFloat() / 1000f).coerceAtLeast(1f)
+        val dynamicBoxWidth = (2f * scaleFactor).coerceAtLeast(2f)
+        val dynamicColWidth = (6f * scaleFactor).coerceAtLeast(4f)
+
         val debugBitmap = bitmap.copy(Bitmap.Config.ARGB_8888, true)
         val canvas = Canvas(debugBitmap)
-        val paintBox = Paint().apply { color = Color.BLUE; style = Paint.Style.STROKE; strokeWidth = 3f }
-        val paintCol = Paint().apply { color = Color.RED; style = Paint.Style.STROKE; strokeWidth = 6f }
+        val paintBox = Paint().apply { color = Color.BLUE; style = Paint.Style.STROKE; strokeWidth = dynamicBoxWidth }
+        val paintCol = Paint().apply { color = Color.RED; style = Paint.Style.STROKE; strokeWidth = dynamicColWidth }
 
         for (element in allElements) {
             element.boundingBox?.let { canvas.drawRect(it, paintBox) }
@@ -142,7 +146,7 @@ class GridPreviewActivity : AppCompatActivity() {
 
         binding.ivGridPreview.setImageBitmap(debugBitmap)
 
-        // 2. 행 분할 및 수량 파악 로직 수행
+        // 행 분할 및 수량 파악 로직 수행
         val rows = mutableListOf<MutableList<Text.Element>>()
         val sortedElements = allElements.sortedBy { it.boundingBox?.top ?: 0 }
 
@@ -179,7 +183,9 @@ class GridPreviewActivity : AppCompatActivity() {
             if (processedMenus.contains(matchedMenu.name)) continue
 
             val qtyRawText = qtyCellElements.joinToString("") { it.text }
-            val quantity = parseTallyStrokes(qtyRawText)
+            
+            // [개선] 기존 단순 문자열 파싱 대신 고성능 JeongStrokeCounter 연동하여 인식률 대폭 향상[cite: 4]
+            val quantity = JeongStrokeCounter.parseTextToQuantity(qtyRawText)
 
             if (quantity > 0) {
                 val itemTotal = matchedMenu.price * quantity
@@ -188,40 +194,5 @@ class GridPreviewActivity : AppCompatActivity() {
                 processedMenus.add(matchedMenu.name)
             }
         }
-    }
-
-    private fun parseTallyStrokes(rawText: String): Int {
-        var text = rawText.replace("\\s".toRegex(), "")
-        if (text.isEmpty()) return 0
-
-        val pureDigits = text.replace("[^0-9]".toRegex(), "")
-        if (pureDigits.isNotEmpty() && text.length == pureDigits.length) {
-            val num = pureDigits.toIntOrNull() ?: 0
-            if (num in 1..99) return num
-        }
-
-        val fullZhengCount = text.count { it == '正' }
-        text = text.replace("正", "", ignoreCase = true)
-        val remainderStrokes = parseSingleTallyPattern(text)
-
-        val total = (fullZhengCount * 5) + remainderStrokes
-        if (total > 0) return total
-
-        if (pureDigits.isNotEmpty()) {
-            val num = pureDigits.toIntOrNull() ?: 0
-            if (num in 1..99) return num
-        }
-        return 0
-    }
-
-    private fun parseSingleTallyPattern(text: String): Int {
-        if (text.isEmpty()) return 0
-        val upperText = text.uppercase()
-
-        if (upperText.contains("IF") || upperText.contains("|F") || upperText.contains("王") || upperText.contains("E")) return 4
-        if (upperText.contains("下") || upperText.contains("ㅠ")) return 3
-        if (upperText.contains("T") || upperText.contains("丅") || upperText.contains("┬") || upperText.contains("ㅜ") || upperText.contains("ㄱ")) return 2
-        if (upperText.contains("一") || upperText.contains("-") || upperText.contains("ㅡ") || upperText.contains("1") || upperText.contains("_") || upperText.contains("~")) return 1
-        return 0
     }
 }
