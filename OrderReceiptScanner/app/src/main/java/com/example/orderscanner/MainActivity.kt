@@ -33,7 +33,7 @@ class MainActivity : AppCompatActivity() {
             val scanResult = GmsDocumentScanningResult.fromActivityResultIntent(result.data)
             val imageUri = scanResult?.pages?.get(0)?.imageUri
             if (imageUri != null) {
-                // 구글 스캐너 완료 후 그리드 확인 미리보기 화면으로 이동
+                // [핵심] 스캔 완료 후 메인에서 처리하지 않고, 그리드 미리보기 화면으로 이동합니다.
                 val intent = Intent(this, GridPreviewActivity::class.java).apply {
                     putExtra("IMAGE_URI", imageUri.toString())
                 }
