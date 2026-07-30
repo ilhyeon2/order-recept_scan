@@ -1,45 +1,29 @@
-<?xml version="1.0" encoding="utf-8"?>
-<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+<!-- activity_main.xml 예시 -->
+<LinearLayout
+    xmlns:android="http://schemas.android.com/apk/res/android"
     android:layout_width="match_parent"
     android:layout_height="match_parent"
     android:gravity="center"
     android:orientation="vertical"
-    android:padding="24dp"
-    android:background="#FAFAFA">
+    android:padding="24dp">
 
-    <ImageView
-        android:layout_width="120dp"
-        android:layout_height="120dp"
-        android:src="@android:drawable/ic_menu_camera"
-        android:contentDescription="Camera Icon"
-        android:layout_marginBottom="24dp"/>
-
-    <TextView
-        android:layout_width="wrap_content"
-        android:layout_height="wrap_content"
-        android:text="주문서 자동 계산 스캐너"
-        android:textSize="22sp"
-        android:textStyle="bold"
-        android:textColor="#212121"
-        android:layout_marginBottom="12dp"/>
-
-    <TextView
-        android:layout_width="wrap_content"
-        android:layout_height="wrap_content"
-        android:text="카메라 정위치에 주문서를 맞추면\n자동 촬영 및 '正' 자 수량이 계산됩니다."
-        android:textAlignment="center"
-        android:textSize="14sp"
-        android:textColor="#757575"
-        android:layout_marginBottom="40dp"/>
-
+    <!-- 기존 스캔 버튼 -->
     <Button
-        android:id="@+id/btn_scan_order"
+        android:id="@+id/btnScanOrder"
         android:layout_width="match_parent"
         android:layout_height="60dp"
-        android:text="주문서 촬영 시작"
-        android:textSize="18sp"
-        android:textStyle="bold"
-        android:backgroundTint="#2196F3"
-        android:elevation="4dp"/>
+        android:text="영수증 스캔 및 정산하기"
+        android:textSize="16sp" />
+
+    <!-- [추가] 별도의 디버그 그리드 확인 버튼 -->
+    <Button
+        android:id="@+id/btnShowDebug"
+        android:layout_width="match_parent"
+        android:layout_height="60dp"
+        android:layout_marginTop="16dp"
+        android:text="🔍 최근 스캔 인식 영역(그리드) 확인"
+        android:textSize="15sp"
+        android:enabled="false"
+        android:alpha="0.5" />
 
 </LinearLayout>
