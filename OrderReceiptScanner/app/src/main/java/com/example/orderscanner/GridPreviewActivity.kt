@@ -112,41 +112,65 @@ class GridPreviewActivity : AppCompatActivity() {
         }
     }
 
+    /**
+     * 영수증에 인쇄된 실제 세로선의 X 좌표를 픽셀 밀도 분석(Vertical Projection)으로 탐지
+     */
+    private fun detectTableBoundaries(bitmap: Bitmap): Pair<Int, Int> {
+        val width = bitmap.width
+        val height = bitmap.height
+        
+        val startY = (height * 0.25).toInt()
+        val endY = (height * 0.85).toInt()
+        
+        val verticalDensity = IntArray(width) { 0 }
+
+        for (x in 0 until width) {
+            var darkCount = 0
+            for (y in startY until endY step 3) {
+                val pixel = bitmap.getPixel(x, y)
+                val brightness = (Color.red(pixel) * 0.299 + Color.green(pixel) * 0.587 + Color.blue(pixel) * 0.114).toInt()
+                if (brightness < 100) {
+                    darkCount++
+                }
+            }
+            verticalDensity[x] = darkCount
+        }
+
+        val col1Min = (width * 0.40).toInt()
+        val col1Max = (width * 0.58).toInt()
+        var bestCol1 = (width * 0.48).toInt()
+        var maxDark1 = -1
+
+        for (x in col1Min..col1Max) {
+            if (verticalDensity[x] > maxDark1) {
+                maxDark1 = verticalDensity[x]
+                bestCol1 = x
+            }
+        }
+
+        val col2Min = bestCol1 + (width * 0.08).toInt()
+        val col2Max = (width * 0.80).toInt()
+        var bestCol2 = (width * 0.68).toInt()
+        var maxDark2 = -1
+
+        for (x in col2Min..col2Max) {
+            if (verticalDensity[x] > maxDark2) {
+                maxDark2 = verticalDensity[x]
+                bestCol2 = x
+            }
+        }
+
+        return Pair(bestCol1, bestCol2)
+    }
+
     private fun analyzeTextAndBuildGrid(bitmap: Bitmap, visionText: Text) {
         val allElements = visionText.textBlocks.flatMap { it.lines }.flatMap { it.elements }
         if (allElements.isEmpty()) return
 
-        val priceHeader = allElements.find { it.text.contains("금액") }
-        val qtyHeader = allElements.find { it.text.contains("수량") }
+        // 1. 인쇄된 테이블 세로선 탐지 (빨간 선 위치)
+        val (col1Boundary, col2Boundary) = detectTableBoundaries(bitmap)
 
-        val maxRight = allElements.maxOfOrNull { it.boundingBox?.right ?: 0 } ?: bitmap.width
-        val col1Boundary = priceHeader?.boundingBox?.left ?: (maxRight * 0.4).toInt()
-
-        val col2Boundary = if (qtyHeader?.boundingBox != null) {
-            (qtyHeader.boundingBox!!.left - 50).coerceAtLeast(col1Boundary + 50)
-        } else {
-            (maxRight * 0.62).toInt()
-        }
-
-        // [개선] 고해상도 이미지 크기에 비례하여 선 두께를 동적으로 계산 (선이 안 보이던 문제 해결)
-        val scaleFactor = (bitmap.width.toFloat() / 1000f).coerceAtLeast(1f)
-        val dynamicBoxWidth = (2f * scaleFactor).coerceAtLeast(2f)
-        val dynamicColWidth = (6f * scaleFactor).coerceAtLeast(4f)
-
-        val debugBitmap = bitmap.copy(Bitmap.Config.ARGB_8888, true)
-        val canvas = Canvas(debugBitmap)
-        val paintBox = Paint().apply { color = Color.BLUE; style = Paint.Style.STROKE; strokeWidth = dynamicBoxWidth }
-        val paintCol = Paint().apply { color = Color.RED; style = Paint.Style.STROKE; strokeWidth = dynamicColWidth }
-
-        for (element in allElements) {
-            element.boundingBox?.let { canvas.drawRect(it, paintBox) }
-        }
-        canvas.drawLine(col1Boundary.toFloat(), 0f, col1Boundary.toFloat(), debugBitmap.height.toFloat(), paintCol)
-        canvas.drawLine(col2Boundary.toFloat(), 0f, col2Boundary.toFloat(), debugBitmap.height.toFloat(), paintCol)
-
-        binding.ivGridPreview.setImageBitmap(debugBitmap)
-
-        // 행 분할 및 수량 파악 로직 수행
+        // 2. 행 분할 로직 수행 (파란 가로선 위치 계산용)
         val rows = mutableListOf<MutableList<Text.Element>>()
         val sortedElements = allElements.sortedBy { it.boundingBox?.top ?: 0 }
 
@@ -167,6 +191,30 @@ class GridPreviewActivity : AppCompatActivity() {
             }
         }
 
+        // 고해상도 이미지 크기에 비례하여 선 두께 동적 조절
+        val scaleFactor = (bitmap.width.toFloat() / 1000f).coerceAtLeast(1f)
+        val dynamicRowWidth = (3f * scaleFactor).coerceAtLeast(2f)
+        val dynamicColWidth = (6f * scaleFactor).coerceAtLeast(4f)
+
+        val debugBitmap = bitmap.copy(Bitmap.Config.ARGB_8888, true)
+        val canvas = Canvas(debugBitmap)
+        
+        val paintRow = Paint().apply { color = Color.BLUE; style = Paint.Style.STROKE; strokeWidth = dynamicRowWidth }
+        val paintCol = Paint().apply { color = Color.RED; style = Paint.Style.STROKE; strokeWidth = dynamicColWidth }
+
+        // 각 행(메뉴별)마다 파란색 가로선 긋기
+        for (row in rows) {
+            val rowTop = row.minOfOrNull { it.boundingBox?.top ?: 0 } ?: continue
+            canvas.drawLine(0f, rowTop.toFloat(), bitmap.width.toFloat(), rowTop.toFloat(), paintRow)
+        }
+
+        // 열 구분용 빨간색 세로선 긋기
+        canvas.drawLine(col1Boundary.toFloat(), 0f, col1Boundary.toFloat(), debugBitmap.height.toFloat(), paintCol)
+        canvas.drawLine(col2Boundary.toFloat(), 0f, col2Boundary.toFloat(), debugBitmap.height.toFloat(), paintCol)
+
+        binding.ivGridPreview.setImageBitmap(debugBitmap)
+
+        // 3. 주문 데이터 매칭 및 수량 파싱 처리
         val processedMenus = mutableSetOf<String>()
 
         for (row in rows) {
@@ -174,7 +222,7 @@ class GridPreviewActivity : AppCompatActivity() {
             val qtyCellElements = row.filter { (it.boundingBox?.centerX() ?: 0) > col2Boundary }
 
             val rowMenuText = menuCellElements.joinToString("") { it.text }.replace("\\s".toRegex(), "")
-            if (rowMenuText.contains("메뉴")) continue
+            if (rowMenuText.contains("메뉴") || rowMenuText.contains("금액") || rowMenuText.contains("수량")) continue
 
             val matchedMenu = masterMenuList.find { menu ->
                 menu.keywords.any { keyword -> rowMenuText.contains(keyword) }
@@ -183,8 +231,6 @@ class GridPreviewActivity : AppCompatActivity() {
             if (processedMenus.contains(matchedMenu.name)) continue
 
             val qtyRawText = qtyCellElements.joinToString("") { it.text }
-            
-            // [개선] 기존 단순 문자열 파싱 대신 고성능 JeongStrokeCounter 연동하여 인식률 대폭 향상[cite: 4]
             val quantity = JeongStrokeCounter.parseTextToQuantity(qtyRawText)
 
             if (quantity > 0) {
