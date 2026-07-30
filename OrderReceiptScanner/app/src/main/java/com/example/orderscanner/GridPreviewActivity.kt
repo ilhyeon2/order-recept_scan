@@ -11,14 +11,28 @@ import android.os.Build
 import android.os.Bundle
 import android.provider.MediaStore
 import android.widget.Toast
-import androidx.appcompat.app.AlertDialog
 import androidx.appcompat.app.AppCompatActivity
 import com.example.orderscanner.databinding.ActivityGridPreviewBinding
 import com.google.mlkit.vision.common.InputImage
 import com.google.mlkit.vision.text.Text
 import com.google.mlkit.vision.text.TextRecognition
 import com.google.mlkit.vision.text.korean.KoreanTextRecognizerOptions
+import java.io.Serializable
 import kotlin.math.abs
+
+// 공통 데이터 클래스 정의
+data class OrderItem(
+    val menuName: String,
+    val unitPrice: Int,
+    val quantity: Int,
+    val totalPrice: Int
+) : Serializable
+
+data class MasterMenu(
+    val name: String,
+    val keywords: List<String>,
+    val price: Int
+)
 
 class GridPreviewActivity : AppCompatActivity() {
 
