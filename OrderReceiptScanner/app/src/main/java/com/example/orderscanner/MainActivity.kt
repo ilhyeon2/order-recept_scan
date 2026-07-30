@@ -64,12 +64,11 @@ class MainActivity : AppCompatActivity() {
         .setGalleryImportAllowed(false)
         .setPageLimit(1)
         .setResultFormats(RESULT_FORMAT_JPEG)
-        .setScannerMode(SCANNER_MODE_FULL)
+        .setScannerMode(SCANNER_MODE_FULL) // 문서를 자동으로 인식하고 평평하게 펴줌(Rectification)
         .build()
 
     private val scanner by lazy { GmsDocumentScanning.getClient(scannerOptions) }
 
-    // (수정) 중복 선언된 scannerLauncher 제거하고 하나만 남김
     private val scannerLauncher = registerForActivityResult(
         ActivityResultContracts.StartIntentSenderForResult()
     ) { result ->
@@ -119,7 +118,7 @@ class MainActivity : AppCompatActivity() {
 
             recognizer.process(inputImage)
                 .addOnSuccessListener { visionText ->
-                    parseOrderSheetWithVirtualGrid(visionText)
+                    parseOrderSheetWithDynamicGrid(visionText)
                 }
                 .addOnFailureListener {
                     showRetakeDialog("텍스트 인식이 불가능합니다. 빛 반사가 없는 곳에서 재촬영해 주세요.")
@@ -129,7 +128,8 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
-    private fun parseOrderSheetWithVirtualGrid(visionText: Text) {
+    // [핵심] 동적 가상 그리드 및 바를 정(正) 획수 기반 정산 로직
+    private fun parseOrderSheetWithDynamicGrid(visionText: Text) {
         val orderItemList = mutableListOf<OrderItem>()
         var calculatedGrandTotal = 0
 
@@ -139,27 +139,29 @@ class MainActivity : AppCompatActivity() {
             return
         }
 
-        // 1. [가상 세로 열(Column) 기준선 설정]
+        // 1. [동적 세로 열(Column) 기준선 생성]
+        // 최상단 "메뉴", "금액", "수량" 텍스트의 중심점(centerX)을 찾아 가상의 세로 기둥을 세움
         val priceHeader = allElements.find { it.text.contains("금액") }
         val qtyHeader = allElements.find { it.text.contains("수량") }
 
-        // 헤더 인식이 안 될 경우를 대비해 전체 화면 비율을 통한 백업 기준선(안전장치) 설정
-        val maxRight = allElements.maxOfOrNull { it.boundingBox?.right ?: 0 } ?: 0
-        val minPriceX = priceHeader?.boundingBox?.left ?: (maxRight * 40 / 100)
-        val minQtyX = qtyHeader?.boundingBox?.left ?: (maxRight * 70 / 100)
+        // 헤더를 못 찾았을 경우를 대비해 스캔된 이미지 전체 너비 기준 비율로 백업 선 설정
+        val maxRight = allElements.maxOfOrNull { it.boundingBox?.right ?: 0 } ?: 1000
+        val col1Boundary = priceHeader?.boundingBox?.left ?: (maxRight * 0.4).toInt() // 메뉴와 금액 사이 선
+        val col2Boundary = qtyHeader?.boundingBox?.left ?: (maxRight * 0.7).toInt()  // 금액과 수량 사이 선
 
-        // 2. [가상 가로 행(Row) 그룹화] 빈 줄 무시하고 실제 텍스트가 있는 줄만 동적으로 묶음
+        // 2. [동적 가로 행(Row) 그룹화]
         val rows = mutableListOf<MutableList<Text.Element>>()
-        val lineThreshold = 45 // 텍스트 높이 오차 허용치
         val sortedElements = allElements.sortedBy { it.boundingBox?.top ?: 0 }
 
         for (element in sortedElements) {
             val box = element.boundingBox ?: continue
             val centerY = box.top + box.height() / 2
+            // 글자 높이를 기준으로 허용 오차 동적 계산 (해상도 독립적)
+            val dynamicThreshold = (box.height() * 0.7).coerceAtLeast(30.0)
 
             val matchedRow = rows.find { row ->
                 val rowCenterY = row.map { (it.boundingBox?.top ?: 0) + (it.boundingBox?.height() ?: 0) / 2 }.average()
-                abs(centerY - rowCenterY) < lineThreshold
+                abs(centerY - rowCenterY) < dynamicThreshold
             }
 
             if (matchedRow != null) {
@@ -171,28 +173,27 @@ class MainActivity : AppCompatActivity() {
 
         val processedMenus = mutableSetOf<String>()
 
-        // 3. [그리드 매칭] 찾아낸 각 행(Row) 안에서 열(Column) 기준선으로 데이터를 분리
+        // 3. [그리드 셀(Cell) 데이터 추출 및 정산]
         for (row in rows) {
-            // '금액' 기준선보다 왼쪽에 있는 텍스트는 메뉴명 영역
-            val menuNameElements = row.filter { (it.boundingBox?.right ?: 0) <= minPriceX + 50 } // 여유 공간 50px 허용
-            // '수량' 기준선보다 오른쪽에 있는 텍스트는 수량 영역
-            val qtyElements = row.filter { (it.boundingBox?.left ?: 0) >= minQtyX - 30 } // 손글씨 침범 30px 허용
+            // 각 행 안에서 열 경계선을 기준으로 셀(Cell)을 나눔
+            val menuCellElements = row.filter { (it.boundingBox?.centerX() ?: 0) < col1Boundary }
+            val qtyCellElements = row.filter { (it.boundingBox?.centerX() ?: 0) > col2Boundary }
 
-            val rowMenuText = menuNameElements.joinToString("") { it.text }.replace("\\s".toRegex(), "")
-            if (rowMenuText.contains("메뉴") || rowMenuText.isEmpty()) continue
+            val rowMenuText = menuCellElements.joinToString("") { it.text }.replace("\\s".toRegex(), "")
+            if (rowMenuText.contains("메뉴")) continue // 헤더 행 패스
 
-            // DB에서 메뉴 매칭
+            // DB 메뉴 매칭
             val matchedMenu = masterMenuList.find { menu ->
                 menu.keywords.any { keyword -> rowMenuText.contains(keyword) }
             } ?: continue
 
             if (processedMenus.contains(matchedMenu.name)) continue
 
-            // 수량 열 영역에 있는 손글씨 텍스트만 추출해서 해석
-            val qtyRawText = qtyElements.joinToString("") { it.text }
-            val quantity = parseHandwrittenQuantity(qtyRawText)
+            // 수량 셀(Cell)에 있는 텍스트만 추출하여 획수 치환 알고리즘 적용
+            val qtyRawText = qtyCellElements.joinToString("") { it.text }
+            val quantity = parseTallyStrokes(qtyRawText)
 
-            // 수량이 명확히 있는 경우에만 리스트에 추가
+            // 수량이 존재하면 정산서 리스트에 추가
             if (quantity > 0) {
                 val itemTotal = matchedMenu.price * quantity
                 calculatedGrandTotal += itemTotal
@@ -206,6 +207,7 @@ class MainActivity : AppCompatActivity() {
             return
         }
 
+        // 결과 화면으로 이동
         val intent = Intent(this, ReceiptActivity::class.java).apply {
             putExtra("ORDER_ITEMS", ArrayList(orderItemList))
             putExtra("TOTAL_PRICE", calculatedGrandTotal)
@@ -213,39 +215,26 @@ class MainActivity : AppCompatActivity() {
         startActivity(intent)
     }
 
-    private fun parseHandwrittenQuantity(rawText: String): Int {
-        val text = rawText.trim()
+    // ['바를 정(正)' 획수를 인식하는 전용 치환 알고리즘]
+    private fun parseTallyStrokes(rawText: String): Int {
+        // 공백 제거 및 대문자 변환
+        val text = rawText.replace("\\s".toRegex(), "").uppercase()
         if (text.isEmpty()) return 0
 
-        // 1. 바를 정(正) 자
-        if (text.contains("正")) return 5
-
-        // 2. 수량 2개 표기 (다양한 손글씨 변형)
-        if (text.contains("T", ignoreCase = true) ||
-            text.contains("r", ignoreCase = true) ||
-            text.contains("Y", ignoreCase = true) ||
-            text.contains("V", ignoreCase = true) ||
-            text.contains("7") ||
-            text.contains("ㅠ") ||
-            text.contains("┬") ||
-            text.contains("ㄱ")) {
-            return 2
-        }
-
-        // 3. 수량 1개 표기
-        if (text.contains("ㅡ") || text.contains("-") || text.contains("~") ||
-            text.contains("1") || text.contains("|") || text.contains("─") ||
-            text.contains("I") || text.contains("l") || text.contains("_") ||
-            text.contains("J", ignoreCase = true)) {
-            return 1
-        }
-
-        // 4. 일반 아라비아 숫자 (1~9 사이)
-        val digits = text.replace("[^0-9]".toRegex(), "")
-        if (digits.isNotEmpty()) {
-            val num = digits.toIntOrNull() ?: 0
-            if (num in 1..9) return num
-        }
+        // 5획 (바를 정 완성)
+        if (text.contains("正") || text.contains("5")) return 5
+        
+        // 4획 ( OCR이 '정'의 4획을 다른 글자로 오인하는 패턴)
+        if (text.contains("止") || text.contains("4") || text.contains("ㅂ") || text.contains("ㅠ")) return 4
+        
+        // 3획
+        if (text.contains("下") || text.contains("F") || text.contains("ㅑ") || text.contains("3")) return 3
+        
+        // 2획 (가장 흔한 오인 패턴인 T 맵핑)
+        if (text.contains("T") || text.contains("丅") || text.contains("ㅜ") || text.contains("ㄱ") || text.contains("2")) return 2
+        
+        // 1획
+        if (text.contains("一") || text.contains("-") || text.contains("ㅡ") || text.contains("1") || text.contains("I") || text.contains("L") || text.contains("l")) return 1
 
         return 0
     }
