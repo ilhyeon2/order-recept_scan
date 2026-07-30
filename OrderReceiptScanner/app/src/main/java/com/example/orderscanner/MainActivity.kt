@@ -46,6 +46,9 @@ class MainActivity : AppCompatActivity() {
 
     private lateinit var binding: ActivityMainBinding
 
+    // 최근 스캔한 디버그용 비트맵을 임시 저장하는 변수
+    private var lastDebugBitmap: Bitmap? = null
+
     private val masterMenuList = listOf(
         MasterMenu("오리주물럭", listOf("오리주물럭", "주물럭"), 35000),
         MasterMenu("오리로스", listOf("오리로스", "로스"), 35000),
@@ -94,8 +97,16 @@ class MainActivity : AppCompatActivity() {
         binding = ActivityMainBinding.inflate(layoutInflater)
         setContentView(binding.root)
 
+        // 1. 스캔 버튼 클릭 리스너
         binding.btnScanOrder.setOnClickListener {
             launchDocumentScanner()
+        }
+
+        // 2. [별도 버튼] 사용자가 직접 눌러서 디버그 그리드를 팝업으로 확인하는 버튼
+        binding.btnShowDebug.setOnClickListener {
+            lastDebugBitmap?.let { bitmap ->
+                showDebugDialog(bitmap)
+            } ?: Toast.makeText(this, "먼저 영수증을 스캔해 주세요.", Toast.LENGTH_SHORT).show()
         }
     }
 
@@ -154,6 +165,11 @@ class MainActivity : AppCompatActivity() {
             (maxRight * 0.62).toInt()
         }
 
+        // [핵심] 스캔 완료 시 디버그 이미지 생성 후 저장 및 디버그 버튼 활성화
+        lastDebugBitmap = drawDebugOverlay(bitmap, visionText, col1Boundary, col2Boundary)
+        binding.btnShowDebug.isEnabled = true
+        binding.btnShowDebug.alpha = 1.0f
+
         val rows = mutableListOf<MutableList<Text.Element>>()
         val sortedElements = allElements.sortedBy { it.boundingBox?.top ?: 0 }
 
@@ -201,23 +217,19 @@ class MainActivity : AppCompatActivity() {
         }
 
         if (orderItemList.isEmpty()) {
-            showRetakeDialog("주문 수량이 표시된 메뉴를 찾지 못했습니다. 수량이 적힌 부분이 잘 보이도록 재촬영해 주세요.")
+            showRetakeDialog("주문 수량이 표시된 메뉴를 찾지 못했습니다. 메인 화면의 '인식 영역 그리드 확인' 버튼을 눌러 선이 어디에 그려졌는지 확인해 보세요.")
             return
         }
 
-        // [핵심 추가] 디버그용 그리드와 텍스트 박스가 그려진 이미지를 팝업으로 먼저 띄워줌
-        val debugBitmap = drawDebugOverlay(bitmap, visionText, col1Boundary, col2Boundary)
-        showDebugDialog(debugBitmap) {
-            // 사용자가 디버그 화면에서 확인 후 '정산서 보기'를 누르면 이동
-            val intent = Intent(this, ReceiptActivity::class.java).apply {
-                putExtra("ORDER_ITEMS", ArrayList(orderItemList))
-                putExtra("TOTAL_PRICE", calculatedGrandTotal)
-            }
-            startActivity(intent)
+        // 정상적으로 수량이 인식된 경우 곧바로 정산서 화면으로 이동
+        val intent = Intent(this, ReceiptActivity::class.java).apply {
+            putExtra("ORDER_ITEMS", ArrayList(orderItemList))
+            putExtra("TOTAL_PRICE", calculatedGrandTotal)
         }
+        startActivity(intent)
     }
 
-    // 텍스트 영역(파란색)과 열 경계선(빨간색)을 그려주는 함수
+    // 빨간선(열 경계)과 파란 박스(텍스트 영역)를 그려주는 오버레이 생성 함수
     private fun drawDebugOverlay(bitmap: Bitmap, visionText: Text, col1: Int, col2: Int): Bitmap {
         val mutableBitmap = bitmap.copy(Bitmap.Config.ARGB_8888, true)
         val canvas = Canvas(mutableBitmap)
@@ -234,7 +246,6 @@ class MainActivity : AppCompatActivity() {
             strokeWidth = 6f
         }
 
-        // 인식된 모든 텍스트의 바운딩 박스(파란색)
         val allElements = visionText.textBlocks.flatMap { it.lines }.flatMap { it.elements }
         for (element in allElements) {
             element.boundingBox?.let { box ->
@@ -242,15 +253,14 @@ class MainActivity : AppCompatActivity() {
             }
         }
 
-        // 동적으로 계산된 세로 열 경계선 (빨간색)
         canvas.drawLine(col1.toFloat(), 0f, col1.toFloat(), mutableBitmap.height.toFloat(), paintCol)
         canvas.drawLine(col2.toFloat(), 0f, col2.toFloat(), mutableBitmap.height.toFloat(), paintCol)
 
         return mutableBitmap
     }
 
-    // 디버그 이미지를 화면에 띄워주는 다이얼로그
-    private fun showDebugDialog(debugBitmap: Bitmap, onProceed: () -> Unit) {
+    // 디버그 이미지를 팝업 창으로 띄워주는 함수
+    private fun showDebugDialog(debugBitmap: Bitmap) {
         val imageView = ImageView(this).apply {
             setImageBitmap(debugBitmap)
             adjustViewBounds = true
@@ -258,11 +268,10 @@ class MainActivity : AppCompatActivity() {
         }
 
         AlertDialog.Builder(this)
-            .setTitle("🔍 그리드 및 인식 영역 검증")
+            .setTitle("🔍 인식 영역 (그리드 검증)")
+            .setMessage("• 파란색 박스: 인식된 텍스트 영역\n• 빨간색 선: 금액/수량 열 구분선")
             .setView(imageView)
-            .setPositiveButton("정산서 확인") { _, _ -> onProceed() }
-            .setNegativeButton("재촬영") { _, _ -> launchDocumentScanner() }
-            .setCancelable(false)
+            .setPositiveButton("닫기", null)
             .show()
     }
 
