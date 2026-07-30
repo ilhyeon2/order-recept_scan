@@ -10,9 +10,11 @@ import android.net.Uri
 import android.os.Build
 import android.os.Bundle
 import android.provider.MediaStore
+import android.widget.ImageView
 import android.widget.Toast
 import androidx.activity.result.IntentSenderRequest
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.appcompat.app.AlertDialog
 import androidx.appcompat.app.AppCompatActivity
 import com.example.orderscanner.databinding.ActivityMainBinding
 import com.google.mlkit.vision.common.InputImage
@@ -152,9 +154,6 @@ class MainActivity : AppCompatActivity() {
             (maxRight * 0.62).toInt()
         }
 
-        // [디버그 시각화 테스트용] 필요시 주석을 해제하여 디버그용 오버레이 이미지를 확인할 수 있습니다.
-        // val debugBitmap = drawDebugOverlay(bitmap, visionText, col1Boundary, col2Boundary)
-
         val rows = mutableListOf<MutableList<Text.Element>>()
         val sortedElements = allElements.sortedBy { it.boundingBox?.top ?: 0 }
 
@@ -206,14 +205,19 @@ class MainActivity : AppCompatActivity() {
             return
         }
 
-        val intent = Intent(this, ReceiptActivity::class.java).apply {
-            putExtra("ORDER_ITEMS", ArrayList(orderItemList))
-            putExtra("TOTAL_PRICE", calculatedGrandTotal)
+        // [핵심 추가] 디버그용 그리드와 텍스트 박스가 그려진 이미지를 팝업으로 먼저 띄워줌
+        val debugBitmap = drawDebugOverlay(bitmap, visionText, col1Boundary, col2Boundary)
+        showDebugDialog(debugBitmap) {
+            // 사용자가 디버그 화면에서 확인 후 '정산서 보기'를 누르면 이동
+            val intent = Intent(this, ReceiptActivity::class.java).apply {
+                putExtra("ORDER_ITEMS", ArrayList(orderItemList))
+                putExtra("TOTAL_PRICE", calculatedGrandTotal)
+            }
+            startActivity(intent)
         }
-        startActivity(intent)
     }
 
-    // [추가된 디버그 시각화 함수] 텍스트 영역(파란색)과 열 경계선(빨간색)을 그려 반환
+    // 텍스트 영역(파란색)과 열 경계선(빨간색)을 그려주는 함수
     private fun drawDebugOverlay(bitmap: Bitmap, visionText: Text, col1: Int, col2: Int): Bitmap {
         val mutableBitmap = bitmap.copy(Bitmap.Config.ARGB_8888, true)
         val canvas = Canvas(mutableBitmap)
@@ -230,6 +234,7 @@ class MainActivity : AppCompatActivity() {
             strokeWidth = 6f
         }
 
+        // 인식된 모든 텍스트의 바운딩 박스(파란색)
         val allElements = visionText.textBlocks.flatMap { it.lines }.flatMap { it.elements }
         for (element in allElements) {
             element.boundingBox?.let { box ->
@@ -237,10 +242,28 @@ class MainActivity : AppCompatActivity() {
             }
         }
 
+        // 동적으로 계산된 세로 열 경계선 (빨간색)
         canvas.drawLine(col1.toFloat(), 0f, col1.toFloat(), mutableBitmap.height.toFloat(), paintCol)
         canvas.drawLine(col2.toFloat(), 0f, col2.toFloat(), mutableBitmap.height.toFloat(), paintCol)
 
         return mutableBitmap
+    }
+
+    // 디버그 이미지를 화면에 띄워주는 다이얼로그
+    private fun showDebugDialog(debugBitmap: Bitmap, onProceed: () -> Unit) {
+        val imageView = ImageView(this).apply {
+            setImageBitmap(debugBitmap)
+            adjustViewBounds = true
+            setPadding(20, 20, 20, 20)
+        }
+
+        AlertDialog.Builder(this)
+            .setTitle("🔍 그리드 및 인식 영역 검증")
+            .setView(imageView)
+            .setPositiveButton("정산서 확인") { _, _ -> onProceed() }
+            .setNegativeButton("재촬영") { _, _ -> launchDocumentScanner() }
+            .setCancelable(false)
+            .show()
     }
 
     private fun parseTallyStrokes(rawText: String): Int {
@@ -298,7 +321,7 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun showRetakeDialog(message: String) {
-        androidx.appcompat.app.AlertDialog.Builder(this)
+        AlertDialog.Builder(this)
             .setTitle("재촬영 요구")
             .setMessage(message)
             .setCancelable(false)
